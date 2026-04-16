@@ -13,10 +13,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"compress/gzip"
+	"compress/flate"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/imroc/req/v3"
+	"github.com/andybalholm/brotli"
 )
 
 type Client struct {
@@ -237,6 +240,7 @@ func (c *Client) SendMessage(conversationID string, message string, stream bool,
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetHeader("referer", fmt.Sprintf(config.ConfigInstance.MirrorProxy+"/chat/%s", conversationID)).
 		SetHeader("accept", "text/event-stream, text/event-stream").
+		SetHeader("accept-encoding", "identity").
 		SetHeader("anthropic-client-platform", "web_claude_ai").
 		SetHeader("cache-control", "no-cache").
 		SetBody(requestBody).
@@ -252,11 +256,13 @@ func (c *Client) SendMessage(conversationID string, message string, stream bool,
 		logger.Error("Handling SendMessage Error: " + resp.String())
 		return resp.StatusCode, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	return 200, c.HandleResponse(resp.Body, stream, gc)
+	// return 200, c.HandleResponse(resp.Body, stream, gc)
+	return 200, c.HandleResponse(resp.Body, resp.Header.Get("Content-Encoding"), stream, gc)
 }
 
 // HandleResponse converts Claude's SSE format to OpenAI format and writes to the response writer
-func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
+// func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
+func (c *Client) HandleResponse(body io.ReadCloser, contentEncoding string, stream bool, gc *gin.Context) error {
 	defer body.Close()
 	// Set headers for streaming
 	if stream {
@@ -267,7 +273,25 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 	}
-	scanner := bufio.NewScanner(body)
+	var bodyReader io.Reader = body
+	switch contentEncoding {
+	case "gzip":
+		gzipReader, err := gzip.NewReader(body)
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer gzipReader.Close()
+		bodyReader = gzipReader
+	case "br":
+		bodyReader = brotli.NewReader(body)
+	case "deflate":
+		flateReader := flate.NewReader(body)
+		defer flateReader.Close()
+		bodyReader = flateReader
+	default:
+		bodyReader = body
+	}
+	scanner := bufio.NewScanner(bodyReader)
 	clientDone := gc.Request.Context().Done()
 	// Keep track of the full response for the final message
 	thinkingShown := false
