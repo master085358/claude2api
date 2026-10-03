@@ -189,8 +189,12 @@ func extractSessionFromAuthHeader(c *gin.Context) (config.SessionInfo, error) {
 }
 
 func handleChatRequest(c *gin.Context, session config.SessionInfo, model string, processor *utils.ChatRequestProcessor, stream bool) bool {
-	// Initialize the Claude client
-	claudeClient := core.NewClient(session.SessionKey, config.ConfigInstance.Proxy, model, session.Thinking, session.Cookie)
+	// Initialize the Claude client with session-specific proxy (fallback to global)
+	proxy := session.Proxy
+	if proxy == "" {
+		proxy = config.ConfigInstance.Proxy
+	}
+	claudeClient := core.NewClient(session.SessionKey, proxy, model, session.Thinking, session.Cookie)
 
 	// Get org ID if not already set
 	if session.OrgID == "" {
@@ -238,13 +242,7 @@ func handleChatRequest(c *gin.Context, session config.SessionInfo, model string,
 	// Send message
 	if _, err := claudeClient.SendMessage(conversationID, processor.Prompt.String(), stream, c); err != nil {
 		logger.Error(fmt.Sprintf("Failed to send message: %v", err))
-		go cleanupConversation(claudeClient, conversationID, 3)
 		return false
-	}
-
-	// Clean up conversation if enabled
-	if config.ConfigInstance.ChatDelete {
-		go cleanupConversation(claudeClient, conversationID, 3)
 	}
 
 	return true

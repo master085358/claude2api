@@ -16,10 +16,13 @@ import (
 )
 
 type SessionInfo struct {
-	SessionKey string `yaml:"sessionKey"`
-	OrgID      string `yaml:"orgID"`
-	Cookie     string `yaml:"cookie"`
-	Thinking   string
+	SessionKey   string `yaml:"sessionKey"`
+	OrgID        string `yaml:"orgID"`
+	Cookie       string `yaml:"cookie"`
+	Name         string `yaml:"name"`
+	Proxy        string `yaml:"proxy"`
+	ProxyCountry string `yaml:"proxyCountry"`
+	Thinking     string
 }
 
 type SessionRagen struct {
@@ -263,7 +266,11 @@ func init() {
 	logger.Info("Loaded config:")
 	logger.Info(fmt.Sprintf("Max Retry count: %d", ConfigInstance.RetryCount))
 	for _, session := range ConfigInstance.Sessions {
-		logger.Info(fmt.Sprintf("Session: %s, OrgID: %s", session.SessionKey, session.OrgID))
+		proxyDisplay := session.Proxy
+		if proxyDisplay == "" {
+			proxyDisplay = "(global)"
+		}
+		logger.Info(fmt.Sprintf("Session: %s, OrgID: %s, Name: %s, Country: %s, Proxy: %s", session.SessionKey, session.OrgID, session.Name, session.ProxyCountry, proxyDisplay))
 	}
 	logger.Info(fmt.Sprintf("Address: %s", ConfigInstance.Address))
 	logger.Info(fmt.Sprintf("APIKey: %s", ConfigInstance.APIKey))

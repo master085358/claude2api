@@ -48,22 +48,22 @@ type ResponseEvent struct {
 }
 
 func NewClient(sessionKey string, proxy string, model string, thinking string, cookie string) *Client {
+	deviceID := uuid.New().String()
 	client := req.C().
 				ImpersonateChrome().
 				SetTimeout(time.Minute * 5).
-				// EnableForceHTTP2().
-				SetUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36").
-				SetTLSFingerprintEdge().
+				SetUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36").
 				DevMode()
 	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {
 		client.SetProxyURL(proxy)
 	}
-	// Set common headers
+	// Set common headers matching browser fingerprint
 	headers := map[string]string{
-		"accept":                    "text/event-stream, text/event-stream",
-		"accept-language":           "zh-CN,zh;q=0.9",
+		"accept":                    "text/event-stream",
+		"accept-language":           "en-US,en;q=0.9,ru;q=0.8",
 		"anthropic-client-platform": "web_claude_ai",
+		"anthropic-device-id":       deviceID,
 		"content-type":              "application/json",
 		"origin":                    config.ConfigInstance.MirrorProxy,
 		"priority":                  "u=1, i",
@@ -76,12 +76,37 @@ func NewClient(sessionKey string, proxy string, model string, thinking string, c
 		Name:  "sessionKey",
 		Value: sessionKey,
 	})
-	if config.ConfigInstance.FuClaude {
-		// logger.Info("FuClaude enabled, setting _Secure-next-auth.session-data cookie: %s", cookie)
+	if config.ConfigInstance.FuClaude && cookie != "" {
 		client.SetCommonCookies(&http.Cookie{
 			Name:  "_Secure-next-auth.session-data",
 			Value: cookie,
 		})
+	}
+	// Build tools array matching browser request
+	tools := []map[string]interface{}{
+		{"type": "web_search_v0", "name": "web_search"},
+		{"type": "artifacts_v0", "name": "artifacts"},
+		{"type": "repl_v0", "name": "repl"},
+		{"type": "widget", "name": "weather_fetch"},
+		{"type": "widget", "name": "recipe_display_v0"},
+		{"type": "widget", "name": "places_map_display_v0"},
+		{"type": "widget", "name": "message_compose_v1"},
+		{"type": "widget", "name": "ask_user_input_v0"},
+		{"type": "widget", "name": "recommend_claude_apps"},
+		{"type": "widget", "name": "show_recommendation_cards"},
+		{"type": "widget", "name": "chart_display_v0"},
+		{"type": "widget", "name": "places_search"},
+		{"type": "widget", "name": "fetch_sports_data"},
+		{"type": "widget", "name": "options_card_display_v0"},
+		{"type": "widget", "name": "step_card_display_v0"},
+		{"type": "widget", "name": "itinerary_display_v0"},
+		{"type": "widget", "name": "translation_display_v0"},
+		{"type": "widget", "name": "comparison_card_display_v0"},
+		{"type": "widget", "name": "featured_card_display_v0"},
+		{"type": "widget", "name": "product_carousel_display_v0"},
+		{"type": "widget", "name": "link_preview_display_v0"},
+		{"type": "widget", "name": "places_list_display_v0"},
+		{"type": "widget", "name": "quiz_display_v0"},
 	}
 	// Create default client with session key
 	c := &Client{
@@ -90,34 +115,13 @@ func NewClient(sessionKey string, proxy string, model string, thinking string, c
 		model:      model,
 		thinking:   thinking,
 		defaultAttrs: map[string]interface{}{
-			"personalized_styles": []map[string]interface{}{
-				{
-					"type":       "default",
-					"key":        "Default",
-					"name":       "Normal",
-					"nameKey":    "normal_style_name",
-					"prompt":     "Normal",
-					"summary":    "Default responses from Claude",
-					"summaryKey": "normal_style_summary",
-					"isDefault":  true,
-				},
-			},
-			"tools": []map[string]interface{}{
-				{
-					"type": "web_search_v0",
-					"name": "web_search",
-				},
-				// {"type": "artifacts_v0", "name": "artifacts"},
-				{"type": "repl_v0", "name": "repl"},
-			},
-			"parent_message_uuid": "00000000-0000-4000-8000-000000000000",
-			"attachments":         []interface{}{},
-			"files":               []interface{}{},
-			"sync_sources":        []interface{}{},
-			"locale":              "en-US",
-			"rendering_mode":      "messages",
-			"timezone":            "America/New_York",
-			// "timezone":            "Asia/Shanghai",
+			"tools":            tools,
+			"attachments":      []interface{}{},
+			"files":            []interface{}{},
+			"sync_sources":     []interface{}{},
+			"locale":           "en-US",
+			"rendering_mode":   "messages",
+			"timezone":         "UTC",
 		},
 	}
 	return c
@@ -233,11 +237,15 @@ func (c *Client) SendMessage(conversationID string, message string, stream bool,
 	// Create request body with default attributes
 	requestBody := c.defaultAttrs
 	requestBody["prompt"] = message
-	if c.model != "claude-sonnet-4-20250514" {
-		requestBody["model"] = c.model
-	}
+	requestBody["model"] = c.model
 	requestBody["effort"] = "medium"
 	requestBody["thinking_mode"] = "auto"
+	requestBody["parent_message_uuid"] = uuid.New().String()
+	requestBody["completion_request_id"] = uuid.New().String()
+	requestBody["turn_message_uuids"] = map[string]string{
+		"human_message_uuid":    uuid.New().String(),
+		"assistant_message_uuid": uuid.New().String(),
+	}
 	// Set up streaming response
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetHeader("referer", fmt.Sprintf(config.ConfigInstance.MirrorProxy+"/chat/%s", conversationID)).
