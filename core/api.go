@@ -47,12 +47,15 @@ type ResponseEvent struct {
 	} `json:"error"`
 }
 
-func NewClient(sessionKey string, proxy string, model string, thinking string, cookie string) *Client {
+func NewClient(sessionKey string, proxy string, model string, thinking string, cookie string, userAgent string) *Client {
 	deviceID := uuid.New().String()
+	if userAgent == "" {
+		userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+	}
 	client := req.C().
 				ImpersonateChrome().
 				SetTimeout(time.Minute * 5).
-				SetUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36").
+				SetUserAgent(userAgent).
 				DevMode()
 	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {

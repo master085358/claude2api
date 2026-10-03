@@ -20,6 +20,7 @@ type SessionInfo struct {
 	OrgID        string `yaml:"orgID"`
 	Cookie       string `yaml:"cookie"`
 	Name         string `yaml:"name"`
+	UserAgent    string `yaml:"userAgent"`
 	Proxy        string `yaml:"proxy"`
 	ProxyCountry string `yaml:"proxyCountry"`
 	Thinking     string

@@ -194,7 +194,7 @@ func handleChatRequest(c *gin.Context, session config.SessionInfo, model string,
 	if proxy == "" {
 		proxy = config.ConfigInstance.Proxy
 	}
-	claudeClient := core.NewClient(session.SessionKey, proxy, model, session.Thinking, session.Cookie)
+	claudeClient := core.NewClient(session.SessionKey, proxy, model, session.Thinking, session.Cookie, session.UserAgent)
 
 	// Get org ID if not already set
 	if session.OrgID == "" {
