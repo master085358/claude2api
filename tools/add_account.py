@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-Add/update account from cURL clipboard data (DevTools > Copy as cURL).
-Extracts: orgID, sessionKey, model, device-id, User-Agent.
+Add/update account from a cURL dump (DevTools > Network > Copy as cURL).
 
-Usage: add_account.py <curl_file> <proxies_file> <config_file> [name]
+Usage:
+  add_account.py <curl_file> <proxies_file> <config_file> <name> [session_key]
+
+If session_key is passed it wins over anything found in the dump.
+Extracts: orgID, sessionKey, User-Agent, anthropic-device-id, model.
+
+The config is edited through PyYAML (load -> mutate -> dump -> reload-check),
+never by regex-splicing text, so the result is always valid YAML.
 """
 import sys
 import re
 
+import yaml
+
+
+# ---------- proxy pool ----------
 
 def detect_country(proxy_url):
-    m = re.search(r'-(\w{2})\.nexorcdn\.com', proxy_url)
+    m = re.search(r'-(\w{2})\.nexorcdn\.com', proxy_url or "")
     return m.group(1).lower() if m else "unknown"
 
 
-def get_proxies_by_country(proxies_file):
+def proxies_by_country(proxies_file):
     with open(proxies_file, "r") as f:
         proxies = [line.strip() for line in f if line.strip()]
     by_country = {}
@@ -23,183 +33,216 @@ def get_proxies_by_country(proxies_file):
     return by_country
 
 
-def pick_proxy(proxies_file, used_proxies, preferred_country=None):
-    by_country = get_proxies_by_country(proxies_file)
+def pick_proxy(proxies_file, used, preferred_country=None):
+    """Prefer an unused proxy from preferred_country; fall back to any unused."""
+    by_country = proxies_by_country(proxies_file)
+    flat = [p for group in by_country.values() for p in group]
+
+    pools = []
     if preferred_country and preferred_country in by_country:
-        for p in by_country[preferred_country]:
-            if p not in used_proxies:
-                return p, preferred_country
-    all_proxies = []
-    for cp in by_country.values():
-        all_proxies.extend(cp)
-    for p in all_proxies:
-        if p not in used_proxies:
-            return p, detect_country(p)
-    if preferred_country and preferred_country in by_country:
-        pool = by_country[preferred_country]
-    else:
-        pool = all_proxies
+        pools.append(by_country[preferred_country])
+    pools.append(flat)
+
+    for pool in pools:
+        for p in pool:
+            if p not in used:
+                return p, detect_country(p)
+
+    # everything taken -> round-robin inside the preferred country
+    pool = by_country.get(preferred_country) if preferred_country else None
+    if not pool:
+        pool = flat
     if pool:
-        idx = len(used_proxies) % len(pool)
+        idx = len(used) % len(pool)
         return pool[idx], detect_country(pool[idx])
     return "", "unknown"
 
 
-def extract_from_curl(text):
-    """Extract all fields from cURL command."""
-    result = {}
+# ---------- cURL parsing ----------
 
-    # sessionKey from Cookie header
-    m = re.search(r"Cookie:\s*[^'\"]*sessionKey=([^;'\"]+)", text)
-    if not m:
-        m = re.search(r"-b\s+['\"]sessionKey=([^;'\"]+)", text)
-    if not m:
-        m = re.search(r'(sk-ant-sid[^\s"\',;\\]+)', text)
-    result["sessionKey"] = m.group(1) if m else None
-
-    # orgID
-    m = re.search(r'/organizations/([a-f0-9-]+)/', text)
-    result["orgID"] = m.group(1) if m else None
-
-    # User-Agent
-    m = re.search(r"User-Agent:\s*([^'\"\\]+)", text)
-    if not m:
-        m = re.search(r"-A\s+['\"]([^'\"]+)", text)
-    result["userAgent"] = m.group(1).strip() if m else ""
-
-    # anthropic-device-id
-    m = re.search(r"anthropic-device-id:\s*([a-f0-9-]+)", text)
-    result["deviceID"] = m.group(1) if m else None
-
-    # model
-    m = re.search(r'"model":\s*"([^"]+)"', text)
-    result["model"] = m.group(1) if m else None
-
-    return result
+def _unquote(value):
+    """Chrome escapes some chars in --data-raw; headers stay plain."""
+    return value.replace("\\'", "'").replace('\\"', '"').strip()
 
 
-def find_session_by_orgid(content, org_id):
-    blocks = re.split(r'(?=\s*- sessionKey:)', content)
-    for block in blocks:
-        if f'orgID: "{org_id}"' in block:
-            name_m = re.search(r'name:\s*"([^"]*)"', block)
-            country_m = re.search(r'proxyCountry:\s*"([^"]*)"', block)
-            return True, name_m.group(1) if name_m else "", country_m.group(1) if country_m else ""
-    return False, "", ""
+def extract_session_key(text):
+    """sessionKey lives in the Cookie header of the cURL dump."""
+    # -H 'Cookie: a=1; sessionKey=sk-ant-...; b=2'
+    for m in re.finditer(r"-H\s+['\"]Cookie:\s*([^'\"]*)['\"]", text, re.IGNORECASE):
+        ck = re.search(r"sessionKey=([^;\s]+)", m.group(1))
+        if ck:
+            return _unquote(ck.group(1))
+    # -b '...' / --cookie '...'
+    for m in re.finditer(r"(?:-b|--cookie)\s+['\"]([^'\"]*)['\"]", text):
+        ck = re.search(r"sessionKey=([^;\s]+)", m.group(1))
+        if ck:
+            return _unquote(ck.group(1))
+    # last resort: raw key anywhere in the dump
+    m = re.search(r"(sk-ant-sid[A-Za-z0-9_\-]+)", text)
+    return m.group(1) if m else None
 
 
-def update_session(content, org_id, session_key, proxy, country, user_agent):
-    lines = content.split("\n")
-    result = []
-    in_target = False
-    for line in lines:
-        if f'orgID: "{org_id}"' in line:
-            in_target = True
-            result.append(line)
-            continue
-        if in_target:
-            if re.match(r'\s*sessionKey:', line):
-                result.append(f'  - sessionKey: "{session_key}"')
-            elif re.match(r'\s*userAgent:', line):
-                result.append(f'    userAgent: "{user_agent}"')
-            elif re.match(r'\s*proxyCountry:', line):
-                result.append(f'    proxyCountry: "{country}"')
-            elif re.match(r'\s*proxy:', line):
-                result.append(f'    proxy: "{proxy}"')
-                in_target = False
-            elif re.match(r'\s*- sessionKey:', line) or (line.strip() and not line.startswith(' ') and not line.startswith('\t')):
-                in_target = False
-                result.append(line)
-            else:
-                result.append(line)
-        else:
-            result.append(line)
-    return "\n".join(result)
+def extract_header(text, name):
+    m = re.search(r"-H\s+['\"]%s:\s*([^'\"]*)['\"]" % re.escape(name),
+                  text, re.IGNORECASE)
+    return _unquote(m.group(1)) if m else None
 
 
-def add_session(content, org_id, session_key, proxy, name, country, user_agent):
-    new_block = f'  - sessionKey: "{session_key}"\n    orgID: "{org_id}"\n    cookie: ""\n    name: "{name}"\n    userAgent: "{user_agent}"\n    proxyCountry: "{country}"\n    proxy: "{proxy}"\n'
-    lines = content.split("\n")
-    insert_idx = None
-    in_sessions = False
-    for i, line in enumerate(lines):
-        if line.startswith("sessions:"):
-            in_sessions = True
-            continue
-        if in_sessions:
-            if line.strip() and not line.startswith(" ") and not line.startswith("\t") and not line.startswith("-"):
-                insert_idx = i
-                break
-    if insert_idx is None:
-        insert_idx = len(lines)
-    lines.insert(insert_idx, new_block.rstrip())
-    return "\n".join(lines)
+def parse_curl(text):
+    org = re.search(r"/organizations/([a-f0-9\-]{36})/", text)
+    model = re.search(r'"model"\s*:\s*"([^"]+)"', text)
+    return {
+        "orgID": org.group(1) if org else None,
+        "sessionKey": extract_session_key(text),
+        "userAgent": extract_header(text, "User-Agent") or "",
+        "deviceID": extract_header(text, "anthropic-device-id"),
+        "model": model.group(1) if model else None,
+    }
+
+
+# ---------- config.yaml ----------
+
+SESSION_KEYS_ORDER = ["sessionKey", "orgID", "cookie", "name",
+                      "userAgent", "proxyCountry", "proxy"]
+
+
+def load_config(path):
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f) or {}
+    if not isinstance(cfg.get("sessions"), list):
+        cfg["sessions"] = []
+    return cfg
+
+
+def save_config(cfg, path):
+    text = yaml.dump(cfg, default_flow_style=False, sort_keys=False,
+                     allow_unicode=True, width=4096)
+    # round-trip guard: never leave a broken file behind
+    yaml.safe_load(text)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def find_session(cfg, org_id):
+    for i, s in enumerate(cfg["sessions"]):
+        if isinstance(s, dict) and s.get("orgID") == org_id:
+            return i
+    return None
+
+
+def ordered_session(s):
+    out = {k: s[k] for k in SESSION_KEYS_ORDER if k in s}
+    for k, v in s.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
+# ---------- main ----------
+
+HINT = """\
+  Chrome dropped the Cookie header. Two ways to fix it:
+
+  A) One-time DevTools toggle (then 'Copy as cURL' always carries cookies):
+     DevTools (F12) -> Network tab -> gear icon (Settings)
+       -> enable "Allow to generate HAR with sensitive data"
+     Then hard-reload the page (Ctrl+Shift+R) so the request is not cached,
+     send a message on claude.ai, wait until the /completion request FINISHES
+     (not pending), right-click -> Copy -> Copy as cURL.
+
+  B) Fastest: paste just the key manually.
+     DevTools -> Application -> Cookies -> https://claude.ai -> sessionKey
+     copy its Value and run:
+       ./tools/add-account.sh <name> <sessionKey>
+"""
 
 
 def main():
-    if len(sys.argv) < 4:
-        print("Usage: add_account.py <curl_file> <proxies_file> <config_file> [name]")
+    if len(sys.argv) < 5:
+        print("Usage: add_account.py <curl_file> <proxies_file> <config_file> "
+              "<name> [session_key]")
         sys.exit(1)
 
-    curl_file = sys.argv[1]
-    proxies_file = sys.argv[2]
-    config_file = sys.argv[3]
-    account_name = sys.argv[4] if len(sys.argv) > 4 else None
+    curl_file, proxies_file, config_file = sys.argv[1], sys.argv[2], sys.argv[3]
+    account_name = sys.argv[4]
+    key_override = sys.argv[5] if len(sys.argv) > 5 else None
 
     with open(curl_file, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
-
     print(f"  Input: {len(text)} chars")
 
-    data = extract_from_curl(text)
+    data = parse_curl(text)
+
+    if key_override:
+        data["sessionKey"] = key_override
+        print("  SessionKey: from argument")
 
     if not data["sessionKey"]:
-        print("ERROR: sessionKey not found in cURL data.")
-        print("  Make sure 'Copy as cURL' includes cookies.")
-        print("  DevTools > Network > right-click > Copy > Copy as cURL")
-        sys.exit(1)
+        print("ERROR: sessionKey not found in the cURL dump.")
+        print(HINT)
+        sys.exit(3)
 
     if not data["orgID"]:
-        print("ERROR: no orgID found in cURL URL")
+        print("ERROR: no /organizations/<uuid>/ in the URL - is this a /completion request?")
         sys.exit(1)
 
-    print(f"  SessionKey: {data['sessionKey'][:40]}...")
-    print(f"  OrgID: {data['orgID']}")
-    print(f"  UserAgent: {data['userAgent'][:60]}...")
+    print(f"  SessionKey: {data['sessionKey'][:36]}...")
+    print(f"  OrgID:      {data['orgID']}")
+    print(f"  UserAgent:  {(data['userAgent'] or '(none)')[:60]}")
     if data["deviceID"]:
-        print(f"  DeviceID: {data['deviceID']}")
+        print(f"  DeviceID:   {data['deviceID']}")
     if data["model"]:
-        print(f"  Model: {data['model']}")
+        print(f"  Model:      {data['model']}")
 
-    with open(config_file, "r") as f:
-        content = f.read()
+    cfg = load_config(config_file)
 
-    used_proxies = re.findall(r'proxy:\s*"([^"]+)"', content)
-    found, existing_name, existing_country = find_session_by_orgid(content, data["orgID"])
+    used = [s.get("proxy") for s in cfg["sessions"]
+            if isinstance(s, dict) and s.get("proxy")]
+    if cfg.get("proxy"):
+        used.append(cfg["proxy"])
 
-    if found:
-        print(f"\n  \"{existing_name}\" EXISTS -> UPDATING (country: {existing_country})")
-        proxy, country = pick_proxy(proxies_file, [p for p in used_proxies if p], existing_country)
-        content = update_session(content, data["orgID"], data["sessionKey"], proxy, country, data["userAgent"])
-        display_name = existing_name
+    idx = find_session(cfg, data["orgID"])
+
+    if idx is not None:
+        session = cfg["sessions"][idx]
+        name = session.get("name") or account_name
+        preferred = session.get("proxyCountry") or None
+        proxy, country = pick_proxy(proxies_file, used, preferred)
+        print(f'\n  "{name}" EXISTS -> UPDATE (country: {preferred or "?"} -> {country})')
+        session["sessionKey"] = data["sessionKey"]
+        session["orgID"] = data["orgID"]
+        session.setdefault("cookie", "")
+        session["name"] = name
+        session["userAgent"] = data["userAgent"]
+        session["proxyCountry"] = country
+        session["proxy"] = proxy
+        cfg["sessions"][idx] = ordered_session(session)
     else:
         if not account_name:
-            print("\nERROR: New account but no name provided.")
+            print("ERROR: new account requires a name.")
             sys.exit(2)
-        proxy, country = pick_proxy(proxies_file, used_proxies)
-        content = add_session(content, data["orgID"], data["sessionKey"], proxy, account_name, country, data["userAgent"])
-        display_name = account_name
-        print(f"\n  \"{account_name}\" -> ADDING")
+        proxy, country = pick_proxy(proxies_file, used)
+        name = account_name
+        print(f'\n  New account "{name}" -> ADD (country: {country})')
+        cfg["sessions"].append(ordered_session({
+            "sessionKey": data["sessionKey"],
+            "orgID": data["orgID"],
+            "cookie": "",
+            "name": name,
+            "userAgent": data["userAgent"],
+            "proxyCountry": country,
+            "proxy": proxy,
+        }))
 
-    with open(config_file, "w") as f:
-        f.write(content)
+    try:
+        save_config(cfg, config_file)
+    except Exception as e:
+        print(f"ERROR: failed to write config: {e}")
+        sys.exit(4)
 
-    print(f"\n  Name:    {display_name}")
-    print(f"  OrgID:   {data['orgID']}")
-    print(f"  Country: {country}")
-    print(f"  Key:     {data['sessionKey'][:40]}...")
-    print(f"  UA:      {data['userAgent'][:50]}...")
-    print(f"  Proxy:   ...{proxy[-40:]}")
+    print(f"\n  OK {name} | {country} | key={data['sessionKey'][:24]}... "
+          f"| proxy=...{proxy[-32:]}")
+    print(f"  sessions total: {len(cfg['sessions'])}")
 
 
 if __name__ == "__main__":
