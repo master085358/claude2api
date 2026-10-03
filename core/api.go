@@ -236,6 +236,8 @@ func (c *Client) SendMessage(conversationID string, message string, stream bool,
 	if c.model != "claude-sonnet-4-20250514" {
 		requestBody["model"] = c.model
 	}
+	requestBody["effort"] = "medium"
+	requestBody["thinking_mode"] = "auto"
 	// Set up streaming response
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetHeader("referer", fmt.Sprintf(config.ConfigInstance.MirrorProxy+"/chat/%s", conversationID)).

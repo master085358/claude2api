@@ -27,9 +27,8 @@ func HealthCheckHandler(c *gin.Context) {
 
 func MoudlesHandler(c *gin.Context) {
 	models := []map[string]interface{}{
-		{"id": "claude-3-7-sonnet-20250219"},
-		{"id": "claude-sonnet-4-20250514"},
-		{"id": "claude-opus-4-20250514"},
+		{"id": "claude-sonnet-5"},
+		{"id": "claude-sonnet-5-5"},
 	}
 
 	extendedModels := make([]map[string]interface{}, 0, len(models)*2)
